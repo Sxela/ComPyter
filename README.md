@@ -1,5 +1,15 @@
 # ComPyter — Jupyter inside ComfyUI
 
+Interactive Jupyter experience inside ComfyUI.
+
+Have you ever tried debugging your inputs, or writing custom nodes and integrating them into ComfyUI? Hours spent sprinkling `print()`s into your node to catch bugs, figure out the input shape, or just see what's actually happening inside?
+
+Now you can do that interactively, Jupyter-style. Drop in the node, add input and output nodes, run the workflow once, and the node's inputs are live in a Jupyter environment you can poke at. With **interactive mode on**, the workflow pauses until you click **Resume**. With it off, your saved code runs against the inputs once per queue and the workflow continues, propagating whatever you reassigned.
+
+State persists inside the kernel between runs, so you can keep iterating on your code and polishing your functions. What a time to be alive.
+
+The code is saved with the workflow and runs on every execution.
+
 Two nodes, one persistent background IPython kernel:
 
 - **Jupyter Notebook** — the default user-friendly node. Embeds a code-cell
