@@ -16,6 +16,57 @@ app.registerExtension({
     },
 });
 
+// Dynamic IO: matches Python's JupyterNotebook.SLOTS. Slot 0 is required
+// and always visible; slots 1..N appear as the trailing slot gets wired
+// (rgthree-style), and the trailing empty ones get reclaimed when their
+// predecessor disconnects.
+const SLOT_NAMES = ["value", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
+const MAX_SLOTS = SLOT_NAMES.length;
+
+function lastWiredSlot(node) {
+    let last = -1;
+    (node.inputs || []).forEach((inp, i) => {
+        if (inp && inp.link != null) last = Math.max(last, i);
+    });
+    (node.outputs || []).forEach((out, i) => {
+        if (out && out.links && out.links.length > 0) last = Math.max(last, i);
+    });
+    return last;
+}
+
+function syncDynamicSlots(node) {
+    if (!node.inputs || !node.outputs) return;
+    const desired = Math.min(
+        Math.max(lastWiredSlot(node) + 2, 1),
+        MAX_SLOTS,
+    );
+
+    // Inputs: grow to `desired`, shrink trailing unwired ones (never slot 0).
+    while (node.inputs.length < desired && node.inputs.length < MAX_SLOTS) {
+        node.addInput(SLOT_NAMES[node.inputs.length], "*");
+    }
+    while (node.inputs.length > desired) {
+        const i = node.inputs.length - 1;
+        if (i <= 0) break;
+        if (node.inputs[i] && node.inputs[i].link != null) break;
+        node.removeInput(i);
+    }
+
+    // Outputs: mirror.
+    while (node.outputs.length < desired && node.outputs.length < MAX_SLOTS) {
+        node.addOutput(SLOT_NAMES[node.outputs.length], "*");
+    }
+    while (node.outputs.length > desired) {
+        const i = node.outputs.length - 1;
+        if (i <= 0) break;
+        const links = node.outputs[i] && node.outputs[i].links;
+        if (links && links.length > 0) break;
+        node.removeOutput(i);
+    }
+
+    node.setDirtyCanvas?.(true, true);
+}
+
 function mkBtn(label) {
     const b = document.createElement("button");
     b.textContent = label;
@@ -72,7 +123,7 @@ function makeEditor(initialCode, onShiftEnter) {
 
     // Fallback textarea -- visible immediately, replaced by CodeMirror if it loads.
     const ta = document.createElement("textarea");
-    ta.placeholder = "# value, label injected. Shift+Enter to run.";
+    ta.placeholder = "# value, b, c, d, e, label injected. Shift+Enter to run.";
     ta.spellcheck = false;
     ta.value = initialCode || "";
     ta.style.cssText = `
@@ -205,6 +256,16 @@ function attachNotebookUI(node) {
         removeWidgetDOM(autoCode);
         if (codeIndex >= 0) node.widgets.splice(codeIndex, 1);
     }
+
+    // Dynamic IO: collapse to one trailing empty slot now (rAF so it lands
+    // after ComfyUI restores saved connections on workflow load), then keep
+    // it in sync whenever a wire is added or removed.
+    requestAnimationFrame(() => syncDynamicSlots(node));
+    const origConnChange = node.onConnectionsChange;
+    node.onConnectionsChange = function (slotType, slot, connected, link_info, ioSlot) {
+        if (origConnChange) origConnChange.apply(this, arguments);
+        syncDynamicSlots(this);
+    };
 
     // ---- root: single column flex container that owns the whole node body
     const root = document.createElement("div");

@@ -345,12 +345,12 @@ def _set_paused(label: str | None) -> None:
 # ---------------------------------------------------------------------------
 # Nodes
 # ---------------------------------------------------------------------------
-def _do_pause(value, label: str, print_attach_block: bool):
-    """Shared pause logic for both node variants.
+def _do_pause_multi(values: dict, label: str, print_attach_block: bool) -> dict:
+    """Pause and expose all named slots in `values` to the kernel namespace.
 
-    Returns whatever `value` is bound to in the kernel namespace at resume
-    time -- so the user can interactively mutate / replace `value` and have
-    the change flow downstream when the graph continues.
+    On resume returns the dict back, reading whatever each name is bound to
+    -- so users can mutate any of them in the cell and have the changes
+    flow downstream.
     """
     _ensure_kernel()
 
@@ -358,7 +358,8 @@ def _do_pause(value, label: str, print_attach_block: bool):
     pause_event.clear()
 
     ns = _kernel_state["user_ns"]
-    ns["value"] = value
+    for k, v in values.items():
+        ns[k] = v
     ns["label"] = label
     ns["resume"] = _make_resume(pause_event, _kernel_state["orig_stdout"])
 
@@ -380,7 +381,12 @@ def _do_pause(value, label: str, print_attach_block: bool):
     finally:
         _set_paused(None)
 
-    return ns.get("value", value)
+    return {k: ns.get(k, v) for k, v in values.items()}
+
+
+def _do_pause(value, label: str, print_attach_block: bool):
+    """Single-slot wrapper around _do_pause_multi for the Breakpoint node."""
+    return _do_pause_multi({"value": value}, label, print_attach_block)["value"]
 
 
 class JupyterBreakpoint:
@@ -421,20 +427,21 @@ class JupyterBreakpoint:
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
-def _exec_noninteractive(value, label: str, code: str, unique_id=None):
-    """Run `code` against `value`/`label` in the persistent kernel namespace.
+def _exec_noninteractive_multi(values: dict, label: str, code: str, unique_id=None) -> dict:
+    """Run `code` against `values`/`label` in the persistent kernel namespace.
 
     Using the same namespace the in-node Run button uses means:
       - state (imports, helpers) carries across queue runs
-      - after a queue, Run can iterate on the latest `value`
+      - after a queue, Run can iterate on the latest values
       - manual Run and queue execution behave identically
-    Returns whatever `value` is bound to in the namespace afterwards.
+    Returns a dict with the same keys, reading whatever each is bound to.
     Buffers the kernel outputs under `unique_id` so the node's UI can fetch
     and render them via /compyter/outputs.
     """
     _ensure_kernel()
     ns = _kernel_state["user_ns"]
-    ns["value"] = value
+    for k, v in values.items():
+        ns[k] = v
     ns["label"] = label
     result = _execute_in_kernel(code)
     outs = result.get("outputs", [])
@@ -448,19 +455,34 @@ def _exec_noninteractive(value, label: str, code: str, unique_id=None):
                 f"JupyterNotebook ({label}) code error:\n"
                 f"{tb or (o.get('ename', '') + ': ' + o.get('evalue', ''))}"
             )
-    return ns.get("value", value)
+    return {k: ns.get(k, v) for k, v in values.items()}
+
+
+def _exec_noninteractive(value, label: str, code: str, unique_id=None):
+    """Single-slot wrapper around _exec_noninteractive_multi."""
+    return _exec_noninteractive_multi(
+        {"value": value}, label, code, unique_id=unique_id
+    )["value"]
 
 
 class JupyterNotebook:
-    """Inline notebook cell inside the node body.
+    """Inline notebook cell inside the node body, with up to 10 dynamic slots.
+
+    `value` is required; `b`...`j` are optional. The web extension hides the
+    optionals by default and reveals the next one whenever the trailing slot
+    becomes wired (rgthree-style dynamic IO). All wired slots are exposed in
+    the kernel namespace under their slot names; reassigning any of them in
+    the cell flows the new value to the matching output slot.
 
     interactive=True  -> pause; the embedded UI runs cells against the
-                        shared kernel, edits to `value` flow downstream on
+                        shared kernel, edits to any slot flow downstream on
                         resume.
     interactive=False -> exec the stored `code` once on queue against the
-                        incoming value (fresh namespace, no pause). Whatever
-                        the code rebinds `value` to is the output.
+                        incoming slot values. Whatever the code rebinds
+                        each name to is its slot's output.
     """
+
+    SLOTS = ("value", "b", "c", "d", "e", "f", "g", "h", "i", "j")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -471,24 +493,35 @@ class JupyterNotebook:
                 "label": ("STRING", {"default": "notebook"}),
                 "code": ("STRING", {"multiline": True, "default": ""}),
             },
+            "optional": {name: (ANY, {}) for name in cls.SLOTS[1:]},
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = (ANY,)
-    RETURN_NAMES = ("value",)
+    RETURN_TYPES = tuple([ANY] * len(SLOTS))
+    RETURN_NAMES = SLOTS
     FUNCTION = "run"
     CATEGORY = "debug"
 
     @classmethod
-    def IS_CHANGED(cls, value, interactive, label, code, unique_id=None):
+    def IS_CHANGED(cls, value, interactive, label, code,
+                   b=None, c=None, d=None, e=None, f=None, g=None,
+                   h=None, i=None, j=None, unique_id=None):
         return time.time()
 
-    def run(self, value, interactive, label, code, unique_id=None):
+    def run(self, value, interactive, label, code,
+            b=None, c=None, d=None, e=None, f=None, g=None,
+            h=None, i=None, j=None, unique_id=None):
+        inputs = dict(zip(self.SLOTS,
+                          [value, b, c, d, e, f, g, h, i, j]))
         if interactive:
-            return (_do_pause(value, label, print_attach_block=False),)
-        if not code or not code.strip():
-            return (value,)
-        return (_exec_noninteractive(value, label, code, unique_id=unique_id),)
+            out = _do_pause_multi(inputs, label, print_attach_block=False)
+        elif not code or not code.strip():
+            return tuple(inputs[k] for k in self.SLOTS)
+        else:
+            out = _exec_noninteractive_multi(
+                inputs, label, code, unique_id=unique_id
+            )
+        return tuple(out[k] for k in self.SLOTS)
 
 
 NODE_CLASS_MAPPINGS = {

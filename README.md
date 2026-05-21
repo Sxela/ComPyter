@@ -23,6 +23,11 @@ the kernel namespace when the graph resumes (or after a non-interactive
 queue) is what flows to the next node — so the Notebook is also an inline
 Python *transform*, not just a viewer.
 
+![Histogram of an image rendered inline in the node](assets/Screenshot2.jpeg)
+
+*Above: a Notebook node running the per-channel histogram recipe inline,
+with the input still passing through to a Preview Image downstream.*
+
 ## Install
 
 ```bash
@@ -43,13 +48,20 @@ pip install jupyter_existing_provisioner    # Lab GUI against an existing kernel
 
 ## Use — Jupyter Notebook (default)
 
-Inputs:
+Inputs (dynamic, up to 10 wildcard slots):
 
-- `value` — anything (link).
+- `value` — anything (link). Required, always visible.
+- `b` … `j` — additional wildcard inputs, optional. Hidden by default; the
+  next empty slot appears whenever the trailing slot gets wired, up to 9
+  optionals. Each is exposed in the kernel namespace under its slot name;
+  mutating any of them in the cell rebinds the matching output.
 - `interactive` (BOOLEAN, default on) — see modes below.
 - `label` (STRING) — shown in the status bar and bound as `label` in the
   kernel.
 - `code` (STRING, multiline) — the cell. Persists with the workflow.
+
+Outputs: `value`, `b`, …, `j` — same names, same types as their inputs
+(wildcard). Trailing unused slots collapse automatically.
 
 ### Interactive mode (`interactive` = on)
 
@@ -143,6 +155,7 @@ plt.tight_layout(); plt.show()
 %matplotlib inline
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 
 img = value[0].detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value[0])
 variants = {
@@ -156,7 +169,17 @@ fig, axes = plt.subplots(1, len(variants), figsize=(3*len(variants), 3))
 for ax, (name, x) in zip(axes, variants.items()):
     ax.imshow(np.clip(x, 0, 1)); ax.set_title(name); ax.axis("off")
 plt.show()
+
+# Send the v-flipped image out on slot `b` so it flows to a second
+# downstream node (dynamic IO: wiring `b`'s output makes the slot appear).
+b = torch.from_numpy(value.numpy()[:, ::-1, ...].copy())
 ```
+
+![Side-by-side transforms with the v-flip routed through dynamic output b](assets/Screenshot1.jpg)
+
+*Above: the cell renders the 4-variant comparison inline, while output
+slot `b` carries the v-flipped tensor to a second Preview Image. The
+optional `c` slot is empty, ready to be wired.*
 
 ### Batch as a GIF (animation)
 
