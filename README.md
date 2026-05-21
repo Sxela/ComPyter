@@ -90,6 +90,154 @@ Inputs:
 After any queue, the **Run** button can still execute code against the
 last-seen `value` to iterate on the transform before re-queuing.
 
+## Recipes
+
+All of these paste straight into the Notebook node's code cell and render
+inline in the node's output panel. `%matplotlib inline` only needs to run
+once per kernel session (so the first cell that uses pyplot).
+
+### Per-channel image histogram
+
+```python
+%matplotlib inline
+import matplotlib.pyplot as plt
+import numpy as np
+
+img = value.detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value)
+if img.ndim == 4: img = img[0]      # ComfyUI IMAGE is BHWC -> first in batch
+
+fig, ax = plt.subplots(figsize=(6, 3))
+for c, color in zip(range(img.shape[-1]), ["red", "green", "blue", "gray"]):
+    ax.hist(img[..., c].flatten(), bins=64, color=color, alpha=0.5, label="RGBA"[c])
+ax.set_xlabel("value"); ax.set_ylabel("count"); ax.legend()
+plt.show()
+```
+
+### Batch as a grid
+
+Useful when `value` is a batch of generated images and you want to eyeball
+them all at once.
+
+```python
+%matplotlib inline
+import matplotlib.pyplot as plt
+import numpy as np
+
+imgs = value.detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value)
+if imgs.ndim == 3: imgs = imgs[None]
+
+n = imgs.shape[0]
+cols = min(n, 4); rows = (n + cols - 1) // cols
+fig, axes = plt.subplots(rows, cols, figsize=(3*cols, 3*rows), squeeze=False)
+for i, ax in enumerate(axes.flat):
+    if i < n:
+        ax.imshow(np.clip(imgs[i], 0, 1))
+        ax.set_title(f"#{i}", fontsize=9)
+    ax.axis("off")
+plt.tight_layout(); plt.show()
+```
+
+### Side-by-side: original vs transform
+
+```python
+%matplotlib inline
+import matplotlib.pyplot as plt
+import numpy as np
+
+img = value[0].detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value[0])
+variants = {
+    "original": img,
+    "h-flip":   img[:, ::-1],
+    "v-flip":   img[::-1, :],
+    "grayscale": np.broadcast_to(img.mean(-1, keepdims=True), img.shape),
+}
+
+fig, axes = plt.subplots(1, len(variants), figsize=(3*len(variants), 3))
+for ax, (name, x) in zip(axes, variants.items()):
+    ax.imshow(np.clip(x, 0, 1)); ax.set_title(name); ax.axis("off")
+plt.show()
+```
+
+### Batch as a GIF (animation)
+
+Treats the batch dimension as time. Renders as `image/gif` — plays inline.
+
+```python
+import io, numpy as np, imageio
+from IPython.display import display, Image
+
+frames = value.detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value)
+if frames.ndim == 3: frames = frames[None]
+frames_u8 = (np.clip(frames, 0, 1) * 255).astype(np.uint8)
+
+buf = io.BytesIO()
+imageio.mimsave(buf, list(frames_u8), format="gif", fps=8, loop=0)
+display(Image(data=buf.getvalue(), format="gif"))
+```
+
+Requires `imageio` in the ComfyUI env (`pip install imageio`).
+
+### Stats table via pandas
+
+A bare DataFrame as the last expression is auto-rendered via its
+`_repr_html_` — comes out as a styled table in the output panel.
+
+```python
+import numpy as np
+import pandas as pd
+
+img = value[0].detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value[0])
+flat = img.reshape(-1, img.shape[-1])
+pd.DataFrame({
+    "channel": list("RGBA")[:img.shape[-1]],
+    "mean":    flat.mean(axis=0),
+    "std":     flat.std(axis=0),
+    "min":     flat.min(axis=0),
+    "max":     flat.max(axis=0),
+}).round(3)
+```
+
+### Interactive Plotly chart
+
+Plotly emits `text/html` + inline JS via `display_data`, so it works as a
+fully interactive widget inside the node (pan, zoom, hover).
+
+```python
+import numpy as np
+import plotly.graph_objects as go
+
+img = value[0].detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value[0])
+
+fig = go.Figure(go.Heatmap(z=img.mean(axis=-1)[::-1], colorscale="Viridis"))
+fig.update_layout(width=420, height=360, margin=dict(l=10,r=10,t=30,b=10),
+                  title="brightness heatmap", paper_bgcolor="#111",
+                  font=dict(color="#ddd"))
+fig.show()
+```
+
+Requires `plotly` (`pip install plotly`).
+
+### Note on `ipywidgets`
+
+Full `ipywidgets` (sliders, dropdowns wired to Python callbacks) need a
+two-way kernel↔browser bridge that the in-node renderer doesn't ship.
+For that interactivity, prefer either:
+
+- the **Jupyter Breakpoint** pro node + an external `jupyter qtconsole`
+  or Lab front-end — those handle the widget comm protocol natively, and
+- **plain HTML controls via `IPython.display.HTML`** for simple in-node UI:
+
+```python
+from IPython.display import display, HTML
+display(HTML("""
+<input type="range" min="0" max="100" oninput="this.nextElementSibling.value=this.value">
+<output>50</output>
+"""))
+```
+
+(The control is purely client-side; round-tripping its state to Python
+needs an extra HTTP endpoint — out of scope for the default node.)
+
 ## Use — Jupyter Breakpoint (pro / headless)
 
 1. Drop **Jupyter Breakpoint** (under `debug`) onto any wire.
