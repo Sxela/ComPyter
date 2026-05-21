@@ -1,0 +1,275 @@
+{
+  "id": "c90c6740-c4cb-40d3-9132-d39306724354",
+  "revision": 0,
+  "last_node_id": 13,
+  "last_link_id": 8,
+  "nodes": [
+    {
+      "id": 2,
+      "type": "LoadImage",
+      "pos": [
+        1659.3680626146468,
+        1557.1672729183515
+      ],
+      "size": [
+        282.78125,
+        339.328125
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            3,
+            7
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "000000.png",
+        "image"
+      ]
+    },
+    {
+      "id": 4,
+      "type": "JupyterNotebook",
+      "pos": [
+        2060.75202795147,
+        1561.3210671966324
+      ],
+      "size": [
+        449.28125,
+        755.75
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "value",
+          "type": "*",
+          "link": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "value",
+          "type": "*",
+          "links": [
+            6
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "JupyterNotebook"
+      },
+      "widgets_values": [
+        false,
+        "notebook",
+        "%matplotlib inline\nimport matplotlib.pyplot as plt\nimport numpy as np\n\nimg = value.detach().cpu().numpy() if hasattr(value, \"detach\") else np.asarray(value)\nif img.ndim == 4: img = img[0]      # ComfyUI IMAGE is BHWC -> first in batch\n\nfig, ax = plt.subplots(figsize=(6, 3))\nfor c, color in zip(range(img.shape[-1]), [\"red\", \"green\", \"blue\", \"gray\"]):\n    ax.hist(img[..., c].flatten(), bins=64, color=color, alpha=0.5, label=\"RGBA\"[c])\nax.set_xlabel(\"value\"); ax.set_ylabel(\"count\"); ax.legend()\nplt.show()\n\nvalue = value[:,::2,::2,:]",
+        ""
+      ]
+    },
+    {
+      "id": 8,
+      "type": "PreviewImage",
+      "pos": [
+        2578.5827922429053,
+        1561.098323958347
+      ],
+      "size": [
+        225,
+        279.328125
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 6
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 9,
+      "type": "Note",
+      "pos": [
+        1648.1857450957584,
+        1969.9704081985196
+      ],
+      "size": [
+        300,
+        241.34375
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "You can use this node as your usual jupyter notebook cell. \nYou can even install python packages. So be careful about what you run in this cell. "
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 10,
+      "type": "JupyterNotebook",
+      "pos": [
+        2054.0597729275714,
+        2416.0917007047665
+      ],
+      "size": [
+        501.875,
+        764.34375
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "value",
+          "type": "*",
+          "link": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "value",
+          "type": "*",
+          "links": [
+            8
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "JupyterNotebook"
+      },
+      "widgets_values": [
+        false,
+        "notebook",
+        "%matplotlib inline\nimport matplotlib.pyplot as plt\nimport numpy as np\n\nimg = value[0].detach().cpu().numpy() if hasattr(value, \"detach\") else np.asarray(value[0])\nvariants = {\n    \"original\": img,\n    \"h-flip\":   img[:, ::-1],\n    \"v-flip\":   img[::-1, :],\n    \"grayscale\": np.broadcast_to(img.mean(-1, keepdims=True), img.shape),\n}\n\nfig, axes = plt.subplots(1, len(variants), figsize=(3*len(variants), 3))\nfor ax, (name, x) in zip(axes, variants.items()):\n    ax.imshow(np.clip(x, 0, 1)); ax.set_title(name); ax.axis(\"off\")\nplt.show()",
+        ""
+      ]
+    },
+    {
+      "id": 11,
+      "type": "PreviewImage",
+      "pos": [
+        2617.9077314977108,
+        2414.3579370033717
+      ],
+      "size": [
+        225,
+        279.328125
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 8
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 13,
+      "type": "Note",
+      "pos": [
+        1653.6264095272957,
+        2434.1804288281337
+      ],
+      "size": [
+        300,
+        241.34375
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "When the interactive mode is on, the node will stop and wait till you click resume."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    }
+  ],
+  "links": [
+    [
+      3,
+      2,
+      0,
+      4,
+      0,
+      "IMAGE"
+    ],
+    [
+      6,
+      4,
+      0,
+      8,
+      0,
+      "IMAGE"
+    ],
+    [
+      7,
+      2,
+      0,
+      10,
+      0,
+      "IMAGE"
+    ],
+    [
+      8,
+      10,
+      0,
+      11,
+      0,
+      "IMAGE"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.6830134553650709,
+      "offset": [
+        -1044.294568908399,
+        -1381.8030277966395
+      ]
+    },
+    "frontendVersion": "1.43.18"
+  },
+  "version": 0.4
+}
