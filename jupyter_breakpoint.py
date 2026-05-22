@@ -51,7 +51,7 @@ ANY = AnyType("*")
 # we clear/set it per pause, and the same kernel thread keeps serving.
 # ---------------------------------------------------------------------------
 _kernel_lock = threading.Lock()
-_exec_lock = threading.Lock()
+_exec_lock = threading.RLock()   # re-entrant so session ops can wrap execs
 _kernel_state: dict = {
     "started": False,
     "user_ns": None,
@@ -62,7 +62,69 @@ _kernel_state: dict = {
     "paused": False,
     "paused_label": None,
     "client": None,
+    "sessions": {},          # name -> dict of user vars saved out of user_ns
+    "active_session": None,  # which session's vars are currently in user_ns
+    "ipython_keys": None,    # snapshot of keys IPython owns; user-keys = the rest
 }
+
+# Slot + label names are partitioned per session, not shared with IPython.
+_SESSION_RESERVED = {"value", "b", "c", "d", "e", "f", "g", "h", "i", "j", "label"}
+
+# IPython-managed convenience names that we never store as session state.
+_IPYTHON_NAMES = {"In", "Out", "exit", "quit", "get_ipython", "help", "display"}
+
+
+def _ensure_ipython_keys():
+    """Lazily snapshot the kernel's IPython-owned keys. Anything currently
+    present in user_ns (after kernel boot) minus our reserved slot/label
+    names counts as IPython-managed and is shared across sessions."""
+    if _kernel_state.get("ipython_keys") is not None:
+        return
+    ns = _kernel_state.get("user_ns") or {}
+    _kernel_state["ipython_keys"] = set(ns.keys()) - _SESSION_RESERVED
+
+
+def _is_user_key(k: str) -> bool:
+    """True if key `k` should be partitioned per session."""
+    if k.startswith("_"):
+        return False
+    if k in _IPYTHON_NAMES:
+        return False
+    ipy_keys = _kernel_state.get("ipython_keys") or set()
+    if k in ipy_keys:
+        return False
+    return True
+
+
+def _activate_session(name: str) -> None:
+    """Make `name` the active session: save current user vars to whichever
+    session is currently active, clear them out of user_ns, then load
+    `name`'s saved vars in. No-op if `name` is already active."""
+    with _exec_lock:
+        _ensure_ipython_keys()
+        ns = _kernel_state["user_ns"]
+        sessions = _kernel_state["sessions"]
+        active = _kernel_state.get("active_session")
+        if active == name:
+            return
+        if active is not None:
+            sessions[active] = {k: v for k, v in ns.items() if _is_user_key(k)}
+        for k in [k for k in list(ns.keys()) if _is_user_key(k)]:
+            del ns[k]
+        ns.update(sessions.get(name, {}))
+        _kernel_state["active_session"] = name
+
+
+def _save_active_session() -> None:
+    """Persist the active session's user-vars from user_ns back to its dict."""
+    with _exec_lock:
+        active = _kernel_state.get("active_session")
+        if active is None:
+            return
+        ns = _kernel_state["user_ns"]
+        _kernel_state["sessions"][active] = {
+            k: v for k, v in ns.items() if _is_user_key(k)
+        }
 
 
 def _resolve_connection_file_path() -> str:
@@ -345,14 +407,20 @@ def _set_paused(label: str | None) -> None:
 # ---------------------------------------------------------------------------
 # Nodes
 # ---------------------------------------------------------------------------
-def _do_pause_multi(values: dict, label: str, print_attach_block: bool) -> dict:
+def _do_pause_multi(
+    values: dict,
+    label: str,
+    print_attach_block: bool,
+    session: str = "default",
+) -> dict:
     """Pause and expose all named slots in `values` to the kernel namespace.
 
     On resume returns the dict back, reading whatever each name is bound to
     -- so users can mutate any of them in the cell and have the changes
-    flow downstream.
+    flow downstream. State is partitioned per `session`.
     """
     _ensure_kernel()
+    _activate_session(session)
 
     pause_event: threading.Event = _kernel_state["pause_event"]
     pause_event.clear()
@@ -381,12 +449,16 @@ def _do_pause_multi(values: dict, label: str, print_attach_block: bool) -> dict:
     finally:
         _set_paused(None)
 
-    return {k: ns.get(k, v) for k, v in values.items()}
+    out = {k: ns.get(k, v) for k, v in values.items()}
+    _save_active_session()
+    return out
 
 
-def _do_pause(value, label: str, print_attach_block: bool):
+def _do_pause(value, label: str, print_attach_block: bool, session: str = "default"):
     """Single-slot wrapper around _do_pause_multi for the Breakpoint node."""
-    return _do_pause_multi({"value": value}, label, print_attach_block)["value"]
+    return _do_pause_multi(
+        {"value": value}, label, print_attach_block, session=session
+    )["value"]
 
 
 class JupyterBreakpoint:
@@ -405,40 +477,93 @@ class JupyterBreakpoint:
             "required": {
                 "value": (ANY, {}),
                 "interactive": ("BOOLEAN", {"default": True}),
-                "label": ("STRING", {"default": "breakpoint"}),
-            }
+                # `label` is legacy: kept so old workflows load without
+                # widget-positions shifting. The actual label now comes
+                # from the LiteGraph node title (sanitized). The JS hides
+                # this widget.
+                "label": ("STRING", {"default": ""}),
+                "session": ("STRING", {"default": "default"}),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "extra_pnginfo": "EXTRA_PNGINFO",
+            },
         }
 
     RETURN_TYPES = (ANY,)
     RETURN_NAMES = ("value",)
     FUNCTION = "run"
     CATEGORY = "debug"
+    OUTPUT_NODE = True   # always execute, even with no downstream consumer
 
     @classmethod
-    def IS_CHANGED(cls, value, interactive, label):
+    def IS_CHANGED(cls, value, interactive, label, session="default",
+                   unique_id=None, extra_pnginfo=None):
         return time.time() if interactive else "passthrough"
 
-    def run(self, value, interactive, label):
+    def run(self, value, interactive, label, session="default",
+            unique_id=None, extra_pnginfo=None):
         if not interactive:
             return (value,)
-        return (_do_pause(value, label, print_attach_block=True),)
+        label = _resolve_label_from_workflow(
+            extra_pnginfo, unique_id, default="breakpoint"
+        )
+        return (_do_pause(value, label, print_attach_block=True, session=session),)
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
-def _exec_noninteractive_multi(values: dict, label: str, code: str, unique_id=None) -> dict:
-    """Run `code` against `values`/`label` in the persistent kernel namespace.
+# ---------------------------------------------------------------------------
+# Label = sanitized node title. NFKD decompose -> drop non-ASCII -> whitespace
+# to underscore -> drop remaining punctuation. JS uses an equivalent algorithm
+# so server-set `label` (status bar / pause banner) matches what manual Run
+# requests send.
+# ---------------------------------------------------------------------------
+import unicodedata as _unicodedata
 
-    Using the same namespace the in-node Run button uses means:
-      - state (imports, helpers) carries across queue runs
-      - after a queue, Run can iterate on the latest values
-      - manual Run and queue execution behave identically
-    Returns a dict with the same keys, reading whatever each is bound to.
-    Buffers the kernel outputs under `unique_id` so the node's UI can fetch
-    and render them via /compyter/outputs.
-    """
+_LABEL_WS_RE = re.compile(r"\s+")
+_LABEL_PUNCT_RE = re.compile(r"[^\w\-]")
+
+
+def _sanitize_label(s, default: str = "notebook") -> str:
+    if not s:
+        return default
+    s = _unicodedata.normalize("NFKD", str(s))
+    s = s.encode("ascii", "ignore").decode("ascii")
+    s = _LABEL_WS_RE.sub("_", s.strip())
+    s = _LABEL_PUNCT_RE.sub("", s)
+    return s or default
+
+
+def _resolve_label_from_workflow(extra_pnginfo, unique_id, default: str) -> str:
+    """Pull the LiteGraph title for this node id from the embedded workflow
+    and sanitize. Falls back to `default` if anything is missing."""
+    try:
+        if not extra_pnginfo or not unique_id:
+            return _sanitize_label(default, default=default)
+        nodes = (extra_pnginfo.get("workflow") or {}).get("nodes") or []
+        target = str(unique_id)
+        for n in nodes:
+            if str(n.get("id")) == target:
+                return _sanitize_label(n.get("title") or default, default=default)
+    except Exception:
+        pass
+    return _sanitize_label(default, default=default)
+
+
+def _exec_noninteractive_multi(
+    values: dict,
+    label: str,
+    code: str,
+    unique_id=None,
+    session: str = "default",
+) -> dict:
+    """Run `code` against `values`/`label` in the kernel namespace, scoped to
+    `session`. Returns a dict with the same keys, reading whatever each is
+    bound to after exec. Buffers outputs under `unique_id` for the UI."""
     _ensure_kernel()
+    _activate_session(session)
     ns = _kernel_state["user_ns"]
     for k, v in values.items():
         ns[k] = v
@@ -448,6 +573,8 @@ def _exec_noninteractive_multi(values: dict, label: str, code: str, unique_id=No
     if unique_id is not None:
         buf = _kernel_state.setdefault("last_outputs", {})
         buf[str(unique_id)] = outs
+    out = {k: ns.get(k, v) for k, v in values.items()}
+    _save_active_session()
     for o in outs:
         if o.get("type") == "error":
             tb = _ANSI_RE.sub("", "\n".join(o.get("traceback", [])))
@@ -455,13 +582,14 @@ def _exec_noninteractive_multi(values: dict, label: str, code: str, unique_id=No
                 f"JupyterNotebook ({label}) code error:\n"
                 f"{tb or (o.get('ename', '') + ': ' + o.get('evalue', ''))}"
             )
-    return {k: ns.get(k, v) for k, v in values.items()}
+    return out
 
 
-def _exec_noninteractive(value, label: str, code: str, unique_id=None):
+def _exec_noninteractive(value, label: str, code: str, unique_id=None,
+                         session: str = "default"):
     """Single-slot wrapper around _exec_noninteractive_multi."""
     return _exec_noninteractive_multi(
-        {"value": value}, label, code, unique_id=unique_id
+        {"value": value}, label, code, unique_id=unique_id, session=session
     )["value"]
 
 
@@ -490,36 +618,54 @@ class JupyterNotebook:
             "required": {
                 "value": (ANY, {}),
                 "interactive": ("BOOLEAN", {"default": True}),
-                "label": ("STRING", {"default": "notebook"}),
+                # `label` is legacy: kept so old workflows load without
+                # widget-positions shifting. Actual label is the sanitized
+                # LiteGraph title (resolved at runtime). The JS hides this
+                # widget.
+                "label": ("STRING", {"default": ""}),
                 "code": ("STRING", {"multiline": True, "default": ""}),
+                # `session` is at the tail of `required` so existing
+                # workflows (saved before sessions existed) still load:
+                # ComfyUI maps widgets_values positionally, and our prior
+                # tail was `code`.
+                "session": ("STRING", {"default": "default"}),
             },
             "optional": {name: (ANY, {}) for name in cls.SLOTS[1:]},
-            "hidden": {"unique_id": "UNIQUE_ID"},
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "extra_pnginfo": "EXTRA_PNGINFO",
+            },
         }
 
     RETURN_TYPES = tuple([ANY] * len(SLOTS))
     RETURN_NAMES = SLOTS
     FUNCTION = "run"
     CATEGORY = "debug"
+    OUTPUT_NODE = True   # always execute, even with no downstream consumer
 
     @classmethod
-    def IS_CHANGED(cls, value, interactive, label, code,
+    def IS_CHANGED(cls, value, interactive, label, code, session="default",
                    b=None, c=None, d=None, e=None, f=None, g=None,
-                   h=None, i=None, j=None, unique_id=None):
+                   h=None, i=None, j=None, unique_id=None,
+                   extra_pnginfo=None):
         return time.time()
 
-    def run(self, value, interactive, label, code,
+    def run(self, value, interactive, label, code, session="default",
             b=None, c=None, d=None, e=None, f=None, g=None,
-            h=None, i=None, j=None, unique_id=None):
+            h=None, i=None, j=None, unique_id=None, extra_pnginfo=None):
+        label = _resolve_label_from_workflow(
+            extra_pnginfo, unique_id, default="notebook"
+        )
         inputs = dict(zip(self.SLOTS,
                           [value, b, c, d, e, f, g, h, i, j]))
         if interactive:
-            out = _do_pause_multi(inputs, label, print_attach_block=False)
+            out = _do_pause_multi(inputs, label, print_attach_block=False,
+                                  session=session)
         elif not code or not code.strip():
             return tuple(inputs[k] for k in self.SLOTS)
         else:
             out = _exec_noninteractive_multi(
-                inputs, label, code, unique_id=unique_id
+                inputs, label, code, unique_id=unique_id, session=session,
             )
         return tuple(out[k] for k in self.SLOTS)
 
@@ -552,11 +698,18 @@ try:
         except Exception:
             body = {}
         code = body.get("code", "") if isinstance(body, dict) else ""
+        session = (body.get("session") if isinstance(body, dict) else None) or "default"
+        label = (body.get("label") if isinstance(body, dict) else None) or ""
         loop = asyncio.get_event_loop()
 
         def _do():
             _ensure_kernel()
-            return _execute_in_kernel(code)
+            _activate_session(session)
+            if label:
+                _kernel_state["user_ns"]["label"] = label
+            result = _execute_in_kernel(code)
+            _save_active_session()
+            return result
 
         try:
             result = await loop.run_in_executor(None, _do)

@@ -1,7 +1,7 @@
 [project]
 name = "compyter"
 description = "Jupyter inside ComfyUI: persistent IPython kernel, in-node notebook cell, and pro external-attach breakpoint."
-version = "0.1.0"
+version = "0.1.1"
 license = {file = "LICENSE"}
 dependencies = ["ipykernel", "jupyter_client"]
 

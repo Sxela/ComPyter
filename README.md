@@ -66,9 +66,16 @@ Inputs (dynamic, up to 10 wildcard slots):
   optionals. Each is exposed in the kernel namespace under its slot name;
   mutating any of them in the cell rebinds the matching output.
 - `interactive` (BOOLEAN, default on) — see modes below.
-- `label` (STRING) — shown in the status bar and bound as `label` in the
-  kernel.
+- `session` (STRING, default `"default"`) — partitions kernel state.
+  Nodes with the same value share variables; different values isolate.
+  See *Shared kernel state and sessions* below.
 - `code` (STRING, multiline) — the cell. Persists with the workflow.
+
+The node's **title** (LiteGraph header — right-click → *Rename*) doubles
+as the label: it's shown in the status bar (`paused @ <title>`), the
+console banner for the Breakpoint variant, the error prefix, and is
+bound to the `label` variable in the kernel. Title is sanitized
+(NFKD → ASCII, spaces → underscores, punctuation dropped) before use.
 
 Outputs: `value`, `b`, …, `j` — same names, same types as their inputs
 (wildcard). Trailing unused slots collapse automatically.
@@ -111,6 +118,64 @@ Outputs: `value`, `b`, …, `j` — same names, same types as their inputs
 
 After any queue, the **Run** button can still execute code against the
 last-seen `value` to iterate on the transform before re-queuing.
+
+## Shared kernel state and sessions
+
+One IPython kernel underlies every Notebook/Breakpoint in the graph, but
+user variables are partitioned by the **`session`** STRING input on each
+node (default `"default"`). Nodes with the same session string share a
+namespace; nodes with different session strings can't see each other's
+variables.
+
+```python
+# Node A   (session = "default")
+OLOLO = value.mean(dim=(1, 2, 3))
+helpers = {"crop": lambda x, k=256: x[:, :k, :k, :]}
+```
+
+```python
+# Node B   (session = "default", later in the graph)
+print(OLOLO)                # ✓ visible -- same session
+value = helpers["crop"](value)
+```
+
+```python
+# Node C   (session = "other")
+print(OLOLO)                # NameError -- isolated namespace
+```
+
+The slot names themselves (`value`, `b` … `j`, `label`) are always
+rebound from the incoming wires at the start of each run, regardless of
+session — they're transport, not state.
+
+IPython internals (`In`, `Out`, `_`, history, etc.) are **shared** across
+sessions; only your own assignments get partitioned. So `_` after a cell
+might come from a different session, but `OLOLO = ...` won't leak.
+
+The **Run** button respects the session too — clicking Run in a node
+executes against that node's session namespace, so interactive
+exploration stays isolated as well.
+
+**Ordering caveat.** ComfyUI only guarantees execution order along the
+dependency graph. If two Notebooks share a session but aren't wired to
+each other, ComfyUI may run them in either order, so node B can't
+reliably see node A's state. Fix: wire **any** slot from A to B — even
+just `value` straight through. That single edge forces `A → B`, and the
+session state (your `OLOLO`, `helpers`, imports, …) rides along
+automatically.
+
+If you don't want to touch `value`, use a sentinel through one of the
+optional slots:
+
+```python
+# Node A -- output b carries a tiny payload purely to create the edge
+b = "A done"
+```
+
+```python
+# Node B (wired: A.b -> B.b, same session)
+# OLOLO, helpers, and anything else A defined are guaranteed available
+```
 
 ## Recipes
 

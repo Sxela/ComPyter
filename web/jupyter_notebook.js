@@ -84,6 +84,19 @@ function stripAnsi(s) {
     return (s || "").replace(/\x1b\[[0-9;]*m/g, "");
 }
 
+// Matches Python's _sanitize_label: NFKD normalize -> drop non-ASCII ->
+// whitespace to underscore -> drop remaining punctuation.
+function sanitizeLabel(s, fallback) {
+    fallback = fallback || "notebook";
+    if (!s) return fallback;
+    let out = String(s).normalize("NFKD")
+        .replace(/[^\x00-\x7F]/g, "")
+        .trim()
+        .replace(/\s+/g, "_")
+        .replace(/[^\w-]/g, "");
+    return out || fallback;
+}
+
 // CodeMirror 6 is loaded lazily from esm.sh, following the official docs
 // pattern: no version pins, no ?bundle, no ?deps. esm.sh resolves the dep
 // graph itself so all three packages share a single @codemirror/state and
@@ -257,6 +270,13 @@ function attachNotebookUI(node) {
         if (codeIndex >= 0) node.widgets.splice(codeIndex, 1);
     }
 
+    // Hide the legacy `label` widget — label is now derived from node.title.
+    const labelWidget = node.widgets?.find((w) => w.name === "label");
+    if (labelWidget) {
+        labelWidget.computeSize = () => [0, -4];
+        labelWidget.type = "compyter_hidden_label";
+    }
+
     // Dynamic IO: collapse to one trailing empty slot now (rAF so it lands
     // after ComfyUI restores saved connections on workflow load), then keep
     // it in sync whenever a wire is added or removed.
@@ -423,6 +443,9 @@ function attachNotebookUI(node) {
     async function execute() {
         const code = editor.value;
         if (!code.trim()) return;
+        const sessionWidget = node.widgets?.find((w) => w.name === "session");
+        const session = (sessionWidget?.value || "default").toString();
+        const label = sanitizeLabel(node.title);
         runBtn.disabled = true;
         const orig = runBtn.textContent;
         runBtn.textContent = "Running...";
@@ -430,7 +453,7 @@ function attachNotebookUI(node) {
             const res = await api.fetchApi("/compyter/execute", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ code }),
+                body: JSON.stringify({ code, session, label }),
             });
             const json = await res.json();
             if (json.ok === false) {
