@@ -476,11 +476,9 @@ class JupyterBreakpoint:
         return {
             "required": {
                 "value": (ANY, {}),
-                "interactive": ("BOOLEAN", {"default": True}),
-                # `label` is legacy: kept so old workflows load without
-                # widget-positions shifting. The actual label now comes
-                # from the LiteGraph node title (sanitized). The JS hides
-                # this widget.
+                "pause": ("BOOLEAN", {"default": True}),
+                # `label` is legacy: hidden in the UI, kept so old workflows
+                # still load. The real label is the sanitized node title.
                 "label": ("STRING", {"default": ""}),
                 "session": ("STRING", {"default": "default"}),
             },
@@ -497,13 +495,13 @@ class JupyterBreakpoint:
     OUTPUT_NODE = True   # always execute, even with no downstream consumer
 
     @classmethod
-    def IS_CHANGED(cls, value, interactive, label, session="default",
+    def IS_CHANGED(cls, value, pause, label, session="default",
                    unique_id=None, extra_pnginfo=None):
-        return time.time() if interactive else "passthrough"
+        return time.time() if pause else "passthrough"
 
-    def run(self, value, interactive, label, session="default",
+    def run(self, value, pause, label, session="default",
             unique_id=None, extra_pnginfo=None):
-        if not interactive:
+        if not pause:
             return (value,)
         label = _resolve_label_from_workflow(
             extra_pnginfo, unique_id, default="breakpoint"
@@ -593,6 +591,46 @@ def _exec_noninteractive(value, label: str, code: str, unique_id=None,
     )["value"]
 
 
+def _exec_no_kernel(values: dict, label: str, code: str, unique_id=None) -> dict:
+    """Run `code` in a fresh local namespace seeded with `values` + `label`.
+
+    No kernel involvement, no shared state across runs. stdout/stderr are
+    captured and buffered for the in-node output panel.
+    """
+    import contextlib
+    import io
+    import traceback
+
+    ns = {
+        **values,
+        "label": label,
+        "__name__": "__main__",
+        "__builtins__": __builtins__,
+    }
+    buf_out, buf_err = io.StringIO(), io.StringIO()
+    error: Exception | None = None
+    with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+        try:
+            exec(compile(code, f"<JupyterNotebook:{label}>", "exec"), ns)
+        except Exception as e:
+            error = e
+            traceback.print_exc(file=buf_err)
+
+    outs: list = []
+    if buf_out.getvalue():
+        outs.append({"type": "stream", "name": "stdout", "text": buf_out.getvalue()})
+    if buf_err.getvalue():
+        outs.append({"type": "stream", "name": "stderr", "text": buf_err.getvalue()})
+    if unique_id is not None:
+        _kernel_state.setdefault("last_outputs", {})[str(unique_id)] = outs
+
+    if error is not None:
+        raise RuntimeError(
+            f"JupyterNotebook ({label}) code error: {error!r}"
+        ) from error
+    return {k: ns.get(k, v) for k, v in values.items()}
+
+
 class JupyterNotebook:
     """Inline notebook cell inside the node body, with up to 10 dynamic slots.
 
@@ -611,23 +649,19 @@ class JupyterNotebook:
     """
 
     SLOTS = ("value", "b", "c", "d", "e", "f", "g", "h", "i", "j")
+    MODES = ("no kernel", "kernel + pause", "kernel + continue")
+    DEFAULT_MODE = "kernel + pause"
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "value": (ANY, {}),
-                "interactive": ("BOOLEAN", {"default": True}),
-                # `label` is legacy: kept so old workflows load without
-                # widget-positions shifting. Actual label is the sanitized
-                # LiteGraph title (resolved at runtime). The JS hides this
-                # widget.
+                "mode": (list(cls.MODES), {"default": cls.DEFAULT_MODE}),
+                # `label` is legacy: hidden in the UI, kept so old workflows
+                # still load. The real label is the sanitized node title.
                 "label": ("STRING", {"default": ""}),
                 "code": ("STRING", {"multiline": True, "default": ""}),
-                # `session` is at the tail of `required` so existing
-                # workflows (saved before sessions existed) still load:
-                # ComfyUI maps widgets_values positionally, and our prior
-                # tail was `code`.
                 "session": ("STRING", {"default": "default"}),
             },
             "optional": {name: (ANY, {}) for name in cls.SLOTS[1:]},
@@ -644,13 +678,13 @@ class JupyterNotebook:
     OUTPUT_NODE = True   # always execute, even with no downstream consumer
 
     @classmethod
-    def IS_CHANGED(cls, value, interactive, label, code, session="default",
+    def IS_CHANGED(cls, value, mode, label, code, session="default",
                    b=None, c=None, d=None, e=None, f=None, g=None,
                    h=None, i=None, j=None, unique_id=None,
                    extra_pnginfo=None):
         return time.time()
 
-    def run(self, value, interactive, label, code, session="default",
+    def run(self, value, mode, label, code, session="default",
             b=None, c=None, d=None, e=None, f=None, g=None,
             h=None, i=None, j=None, unique_id=None, extra_pnginfo=None):
         label = _resolve_label_from_workflow(
@@ -658,15 +692,21 @@ class JupyterNotebook:
         )
         inputs = dict(zip(self.SLOTS,
                           [value, b, c, d, e, f, g, h, i, j]))
-        if interactive:
+
+        if mode == "kernel + pause":
             out = _do_pause_multi(inputs, label, print_attach_block=False,
                                   session=session)
-        elif not code or not code.strip():
-            return tuple(inputs[k] for k in self.SLOTS)
-        else:
+        elif mode == "kernel + continue":
+            if not code or not code.strip():
+                return tuple(inputs[k] for k in self.SLOTS)
             out = _exec_noninteractive_multi(
                 inputs, label, code, unique_id=unique_id, session=session,
             )
+        else:   # "no kernel"
+            if not code or not code.strip():
+                return tuple(inputs[k] for k in self.SLOTS)
+            out = _exec_no_kernel(inputs, label, code, unique_id=unique_id)
+
         return tuple(out[k] for k in self.SLOTS)
 
 

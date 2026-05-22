@@ -65,7 +65,7 @@ Inputs (dynamic, up to 10 wildcard slots):
   next empty slot appears whenever the trailing slot gets wired, up to 9
   optionals. Each is exposed in the kernel namespace under its slot name;
   mutating any of them in the cell rebinds the matching output.
-- `interactive` (BOOLEAN, default on) — see modes below.
+- `mode` (3-way dropdown, default *kernel + pause*) — see *Modes* below.
 - `session` (STRING, default `"default"`) — partitions kernel state.
   Nodes with the same value share variables; different values isolate.
   See *Shared kernel state and sessions* below.
@@ -80,44 +80,56 @@ bound to the `label` variable in the kernel. Title is sanitized
 Outputs: `value`, `b`, …, `j` — same names, same types as their inputs
 (wildcard). Trailing unused slots collapse automatically.
 
-### Interactive mode (`interactive` = on)
+### Modes
 
-1. Drop **Jupyter Notebook** (under `debug`) onto any wire.
-2. Queue the workflow. The node pauses; status bar shows `paused @ <label>`.
-3. Type code in the `code` editor, **Shift+Enter** (or click *Run*) to
-   execute against the shared kernel. `value` and `label` are bound:
+The `mode` dropdown decides what happens during a queue execution:
 
-   ```python
-   value.shape, value.dtype                        # tensor inspection
-   import matplotlib.pyplot as plt
-   plt.imshow(value[0].permute(1,2,0).cpu()); plt.show()   # inline plot
-   value = value[:, :256, :256, :]                 # crop -> flows downstream
-   ```
+#### `kernel + pause` (default)
+Pause the workflow and hand off to the in-node cell. `value` and `label`
+are bound in the kernel namespace; everything else is whatever your
+session has carried over.
 
-   Output area handles text, images (`image/png`, `image/jpeg`), HTML, and
-   error tracebacks (ANSI stripped).
-4. Click **Resume ▶**. Whatever `value` is bound to at that moment is what
-   the next node sees. Kernel and session stay alive for the next pause.
+```python
+value.shape, value.dtype                        # tensor inspection
+import matplotlib.pyplot as plt
+plt.imshow(value[0].permute(1,2,0).cpu()); plt.show()   # inline plot
+value = value[:, :256, :256, :]                 # crop -> flows downstream
+```
 
-### Non-interactive mode (`interactive` = off)
+Click **Resume ▶** to continue; whatever `value` is bound to at that
+moment is what the next node sees. The kernel + session stay alive for
+the next pause.
 
-1. Set `interactive` off and write code in the `code` field that *acts on*
-   `value`. E.g.:
+#### `kernel + continue`
+No pause — run the saved `code` once on queue, in the persistent kernel
+namespace, against the incoming `value`. Whatever your code rebinds is
+what flows downstream.
 
-   ```python
-   print(value.shape)
-   value = value[:, ::2, ::2, :]
-   print(value.shape)
-   ```
+```python
+print(value.shape)
+value = value[:, ::2, ::2, :]
+print(value.shape)
+```
 
-2. Queue. The node does **not** pause — it runs `code` once against the
-   incoming `value` (in the same persistent kernel namespace the Run button
-   uses) and passes the resulting `value` downstream.
-3. `print()`, return values, matplotlib figures, error tracebacks all
-   render into the node's output area within ~1s of queue completion.
+`print()`, matplotlib figures, results, error tracebacks all render into
+the node's output area within ~1s of queue completion. State (imports,
+helpers, custom vars) carries across queues via the session.
 
-After any queue, the **Run** button can still execute code against the
-last-seen `value` to iterate on the transform before re-queuing.
+#### `no kernel`
+Run the saved `code` once on queue in a **throwaway** namespace
+(no kernel involvement, no shared state). Stdout/stderr/errors still
+render in the output area; matplotlib inline / rich display do not work
+in this mode (no IPython hooks).
+
+Use when you want a pure stateless transform and don't want the
+side-effect of kernel state lingering.
+
+---
+
+The **Run** button (and Shift+Enter) always executes against the
+persistent kernel using this node's `session`, regardless of mode — it's
+for interactive exploration. After any queue, Run still lets you poke at
+the last-seen `value`.
 
 ## Shared kernel state and sessions
 
