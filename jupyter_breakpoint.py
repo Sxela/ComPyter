@@ -591,15 +591,49 @@ def _exec_noninteractive(value, label: str, code: str, unique_id=None,
     )["value"]
 
 
+def _strip_ipython_syntax(code: str) -> tuple[str, int]:
+    """Remove IPython-only line magics (`%foo`), shell commands (`!foo`)
+    and cell magics (`%%foo` + everything after) so the remaining text is
+    valid Python and can be exec()'d. Blank lines are preserved where
+    something was stripped so traceback line numbers still match the
+    original cell. Returns (cleaned_code, stripped_count).
+    """
+    cleaned: list[str] = []
+    stripped = 0
+    in_cell_magic = False
+    for line in code.splitlines():
+        if in_cell_magic:
+            # Everything after a %%cell-magic belongs to its body.
+            cleaned.append("")
+            stripped += 1
+            continue
+        ls = line.lstrip()
+        if ls.startswith("%%"):
+            in_cell_magic = True
+            cleaned.append("")
+            stripped += 1
+            continue
+        if ls.startswith("%") or ls.startswith("!"):
+            cleaned.append("")
+            stripped += 1
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned), stripped
+
+
 def _exec_no_kernel(values: dict, label: str, code: str, unique_id=None) -> dict:
     """Run `code` in a fresh local namespace seeded with `values` + `label`.
 
-    No kernel involvement, no shared state across runs. stdout/stderr are
-    captured and buffered for the in-node output panel.
+    No kernel involvement, no shared state across runs. IPython-only syntax
+    (line/cell magics, shell `!` commands) is stripped first so the code
+    parses as plain Python. stdout/stderr are captured and buffered for
+    the in-node output panel.
     """
     import contextlib
     import io
     import traceback
+
+    cleaned_code, stripped = _strip_ipython_syntax(code)
 
     ns = {
         **values,
@@ -608,10 +642,15 @@ def _exec_no_kernel(values: dict, label: str, code: str, unique_id=None) -> dict
         "__builtins__": __builtins__,
     }
     buf_out, buf_err = io.StringIO(), io.StringIO()
+    if stripped:
+        buf_err.write(
+            f"[no kernel] skipped {stripped} IPython-only line(s) "
+            f"(% magics, !shell, %%cell magics)\n"
+        )
     error: Exception | None = None
     with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
         try:
-            exec(compile(code, f"<JupyterNotebook:{label}>", "exec"), ns)
+            exec(compile(cleaned_code, f"<JupyterNotebook:{label}>", "exec"), ns)
         except Exception as e:
             error = e
             traceback.print_exc(file=buf_err)

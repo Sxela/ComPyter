@@ -327,6 +327,60 @@ fig.show()
 
 Requires `plotly` (`pip install plotly`).
 
+### Pad / unpad to a multiple of N
+
+A practical two-node pattern. Node A applies an explicit `pad_x` /
+`pad_y` and *then* rounds the resulting dims up to be divisible by `n`
+(e.g. 8 for a VAE, 64 for some samplers). It propagates the padded
+image on `value` and the padding stats on slot `b`. Node B downstream
+reads `b` and crops back to the original size. Works in any mode,
+including `no kernel` — `b` is wired, not relying on shared state.
+
+**Node A — pad** (`mode = kernel + continue` or `no kernel`):
+
+```python
+import torch.nn.functional as F
+
+pad_x, pad_y = 16, 16     # explicit padding to apply
+n           = 64          # final dims must be divisible by this
+
+B, H, W, C = value.shape
+target_h = -(-(H + pad_y) // n) * n           # ceil((H+pad_y)/n)*n
+target_w = -(-(W + pad_x) // n) * n
+pad_h, pad_w = target_h - H, target_w - W     # total pad incl. round-up
+
+# F.pad expects BCHW with (left, right, top, bottom). Distribute the pad
+# so the original image sits at the top-left -- simplest to crop back.
+# Pad with 0 (black) so the padded region is visible in previews.
+bchw = value.permute(0, 3, 1, 2)
+padded = F.pad(bchw, (0, pad_w, 0, pad_h), mode="constant", value=0).permute(0, 2, 3, 1)
+
+print(f"pad: {(H, W)} +({pad_y},{pad_x}) -> rounded {(target_h, target_w)}")
+
+value = padded
+b = {                # padding stats for the unpad node
+    "orig_h": H, "orig_w": W,
+    "pad_h": pad_h, "pad_w": pad_w,
+    "pad_x": pad_x, "pad_y": pad_y, "n": n,
+}
+```
+
+Wire `A.value → (your processing chain) → B.value`, and `A.b → B.b`.
+
+**Node B — unpad**:
+
+```python
+oh, ow = b["orig_h"], b["orig_w"]
+value = value[:, :oh, :ow, :]
+print(f"unpad: {value.shape[1:3]} (was padded by h={b['pad_h']}, w={b['pad_w']})")
+```
+
+That's it — downstream nodes see the original-sized image again. The
+example uses `mode="constant", value=0` so the padded region shows up
+as black in previews (handy for sanity checking). For real pipelines
+swap to `"reflect"` or `"replicate"` if a model upstream prefers a
+non-zero pad.
+
 ### Note on `ipywidgets`
 
 Full `ipywidgets` (sliders, dropdowns wired to Python callbacks) need a
